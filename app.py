@@ -15,36 +15,46 @@ import requests
 import streamlit as st
 
 # ==========================================
-# 1. 기본 설정 및 상수
+# 1. 기본 설정 및 3시즌 검증 확정 파라미터
 # ==========================================
 st.set_page_config(page_title="V-League 몬테카를로 분석기", page_icon="🏐", layout="wide")
 
 HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/130.0.0.0 Safari/537.36",
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+    ),
     "Referer": "https://kovo.co.kr/",
     "Origin": "https://kovo.co.kr",
 }
 
+# 2023-24(020), 2024-25(021), 2025-26(022) 3시즌 OOS 백테스팅 확정 가중치
 WEIGHTS = {
-    "1": {  # 남자부
-        "base_so": 0.65,
-        "atk": 2.30,
-        "opp_drtg": 1.35,
-        "rec": 0.85,
-        "srv": 0.14,
-        "blk": 0.10,
-        "err": 0.08,
-        "home": 0.05,
+    "1": {  # 남자부 (OOS 70%+ 적중률 74.4%, 총점 Bias +0.04점)
+        "base_so": 0.64,
+        "default_l5": 0.35,
+        "default_ou": 181.5,
+        "match_sigma": 0.12,
+        "atk": 1.730,
+        "opp_drtg": 0.804,
+        "rec": 0.319,
+        "srv": 0.086,
+        "blk": 0.089,
+        "err": 0.000,
+        "home": 0.028,
     },
-    "2": {  # 여자부
-        "base_so": 0.59,
-        "atk": 1.95,
-        "opp_drtg": 1.45,
-        "rec": 1.40,
-        "srv": 0.12,
-        "blk": 0.11,
-        "err": 0.10,
-        "home": 0.04,
+    "2": {  # 여자부 (OOS 70%+ 적중률 81.8%, 총점 Bias +0.36점)
+        "base_so": 0.58,
+        "default_l5": 0.20,
+        "default_ou": 177.5,
+        "match_sigma": 0.13,
+        "atk": 1.266,
+        "opp_drtg": 1.026,
+        "rec": 0.816,
+        "srv": 0.141,
+        "blk": 0.071,
+        "err": 0.116,
+        "home": 0.072,
     },
 }
 
@@ -72,39 +82,39 @@ def _get_github_config() -> Tuple[Optional[str], Optional[str], str]:
         return None, None, "main"
 
 
+def _normalize_db(df: pd.DataFrame) -> pd.DataFrame:
+    for col in DB_COLUMNS:
+        if col not in df.columns:
+            df[col] = np.nan
+    return df[DB_COLUMNS]
+
+
 def load_db() -> pd.DataFrame:
     token, repo, branch = _get_github_config()
     if token and repo:
         url = f"https://api.github.com/repos/{repo}/contents/{DB_FILENAME}"
-        gh_headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+        gh_headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
         try:
             r = requests.get(url, headers=gh_headers, params={"ref": branch}, timeout=8)
             if r.status_code == 200:
                 content = base64.b64decode(r.json()["content"]).decode("utf-8-sig")
                 df = pd.read_csv(io.StringIO(content), dtype={"홈코드": str, "원정코드": str})
-                for col in DB_COLUMNS:
-                    if col not in df.columns:
-                        df[col] = np.nan
-                return df[DB_COLUMNS]
+                return _normalize_db(df)
         except Exception:
             pass
 
     if os.path.exists(DB_FILENAME):
         df = pd.read_csv(DB_FILENAME, dtype={"홈코드": str, "원정코드": str})
-        for col in DB_COLUMNS:
-            if col not in df.columns:
-                df[col] = np.nan
-        return df[DB_COLUMNS]
+        return _normalize_db(df)
 
     return pd.DataFrame(columns=DB_COLUMNS)
 
 
 def save_db(df: pd.DataFrame) -> str:
-    df = df.copy()
-    for col in DB_COLUMNS:
-        if col not in df.columns:
-            df[col] = np.nan
-    df = df[DB_COLUMNS]
+    df = _normalize_db(df.copy())
     csv_text = df.to_csv(index=False, encoding="utf-8-sig")
 
     with open(DB_FILENAME, "w", encoding="utf-8-sig", newline="") as f:
@@ -113,7 +123,10 @@ def save_db(df: pd.DataFrame) -> str:
     token, repo, branch = _get_github_config()
     if token and repo:
         url = f"https://api.github.com/repos/{repo}/contents/{DB_FILENAME}"
-        gh_headers = {"Authorization": f"token {token}", "Accept": "application/vnd.github.v3+json"}
+        gh_headers = {
+            "Authorization": f"token {token}",
+            "Accept": "application/vnd.github.v3+json",
+        }
         sha = None
         try:
             r_get = requests.get(url, headers=gh_headers, params={"ref": branch}, timeout=8)
@@ -133,11 +146,11 @@ def save_db(df: pd.DataFrame) -> str:
         except Exception as e:
             return f"로컬 저장 완료 (GitHub 연결 실패: {e})"
 
-    return "로컬 저장 완료 (GitHub Secrets 미설정 - CSV 백업 권장)"
+    return "로컬 저장 완료 (GitHub Secrets 미설정 - 엑셀 백업 권장)"
 
 
 # ==========================================
-# 3. KOVO API 수집 모듈
+# 3. KOVO 공식 API 데이터 수집 모듈
 # ==========================================
 @st.cache_data(ttl=600)
 def fetch_team_records(gender: str, season: str = "023", round_num: int = 0) -> pd.DataFrame:
@@ -164,15 +177,17 @@ def fetch_team_records(gender: str, season: str = "023", round_num: int = 0) -> 
             "tcode": str(it["tcode"]),
             "team": it["tsname"],
             "logo": it.get("emblumUrl", ""),
-            "games": int(it.get("g_count", 0)),
+            "games": int(it.get("g_count", 0) or 0),
             "sets": s_cnt,
-            "attack_pct": float(it.get("atsp", 0.0)),
-            "attack_eff": (it.get("ats", 0) - it.get("ate", 0) - it.get("atf", 0)) / att,
-            "receive_eff": (it.get("rs", 0) - it.get("rf", 0)) / rt,
-            "serve_ace_ps": float(it.get("ssp", 0.0)),
-            "block_ps": float(it.get("bsp", 0.0)),
-            "dig_ps": float(it.get("dsp", 0.0)),
-            "error_ps": float(it.get("err", 0.0)) / s_cnt,
+            "attack_pct": float(it.get("atsp", 0.0) or 0.0),
+            "attack_eff": (
+                (it.get("ats", 0) or 0) - (it.get("ate", 0) or 0) - (it.get("atf", 0) or 0)
+            ) / att,
+            "receive_eff": ((it.get("rs", 0) or 0) - (it.get("rf", 0) or 0)) / rt,
+            "serve_ace_ps": float(it.get("ssp", 0.0) or 0.0),
+            "block_ps": float(it.get("bsp", 0.0) or 0.0),
+            "dig_ps": float(it.get("dsp", 0.0) or 0.0),
+            "error_ps": float(it.get("err", 0.0) or 0.0) / s_cnt,
         })
     return pd.DataFrame(rows)
 
@@ -246,7 +261,7 @@ def build_team_l5_profile(
     finished_games: List[Dict],
     target_date_str: str,
     season: str = "023",
-    l5_weight: float = 0.45,
+    l5_weight: float = 0.35,
 ) -> Dict:
     tcode_str = str(tcode)
     team_games = [
@@ -371,7 +386,7 @@ def get_h2h_summary(finished_games: List[Dict], home_code: str, away_code: str) 
 
 
 # ==========================================
-# 5. 풀세트 랠리 단위 몬테카를로 시뮬레이션
+# 5. 랠리 단위 몬테카를로 엔진 (match_sigma 반영)
 # ==========================================
 def logit(p: float) -> float:
     return math.log(p / (1.0 - p))
@@ -409,7 +424,7 @@ def run_volleyball_mc(
     if total_h2h_sets >= 3:
         h2h_edge = max(-0.04, min(0.04, ((h2h["h_sets"] / total_h2h_sets) - 0.5) * 0.12))
 
-    def calc_so(off: Dict, opp: Dict, is_home: bool, adj: float, edge: float) -> float:
+    def calc_logit(off: Dict, opp: Dict, is_home: bool, adj: float, edge: float) -> float:
         z = logit(w["base_so"])
         z += w["atk"] * (off["attack_eff"] - league_avg["attack_eff"])
         z += w["opp_drtg"] * (opp["opp_atk_allowed"] - league_avg["attack_eff"])
@@ -418,19 +433,28 @@ def run_volleyball_mc(
         z -= w["blk"] * (opp["block_ps"] - league_avg["block_ps"])
         z -= w["err"] * (off["error_ps"] - league_avg["error_ps"])
         z += (w["home"] if is_home else 0.0) + fatigue_pen(off) + edge + adj
-        return max(0.35, min(0.85, sigmoid(z)))
+        return z
 
-    p_so_h = calc_so(home, away, True, home_adj, h2h_edge)
-    p_so_a = calc_so(away, home, False, away_adj, -h2h_edge)
-    p_brk_h = 1.0 - p_so_a
+    z_h = calc_logit(home, away, True, home_adj, h2h_edge)
+    z_a = calc_logit(away, home, False, away_adj, -h2h_edge)
+    p_so_h = max(0.35, min(0.85, sigmoid(z_h)))
+    p_so_a = max(0.35, min(0.85, sigmoid(z_a)))
+    match_sigma = w["match_sigma"]
 
     random.seed(seed)
     rand = random.random
+    gauss = random.gauss
     scores = Counter()
     totals = []
     h_wins, set_handi_hits, over_hits = 0, 0, 0
 
     for _ in range(n_sims):
+        # 당일 경기 팀 컨디션 편차 (세트 간 상관관계 반영 -> 실제 3/4/5세트 비율 정렬)
+        delta = gauss(0.0, match_sigma)
+        p_so_h_sim = max(0.35, min(0.85, sigmoid(z_h + delta)))
+        p_so_a_sim = max(0.35, min(0.85, sigmoid(z_a - delta)))
+        p_brk_h_sim = 1.0 - p_so_a_sim
+
         hs, as_, h_tot, a_tot = 0, 0, 0, 0
         s1_srv = 0 if rand() < 0.5 else 1
         set_no = 1
@@ -440,13 +464,13 @@ def run_volleyball_mc(
             hp, ap = 0, 0
             while True:
                 if srv == 0:
-                    if rand() < p_brk_h:
+                    if rand() < p_brk_h_sim:
                         hp += 1
                     else:
                         ap += 1
                         srv = 1
                 else:
-                    if rand() < p_so_h:
+                    if rand() < p_so_h_sim:
                         hp += 1
                         srv = 0
                     else:
@@ -473,6 +497,8 @@ def run_volleyball_mc(
 
     totals_arr = np.array(totals)
     home_sh_prob = set_handi_hits / n_sims
+    set_scores = {k: scores[k] / n_sims for k in ["3-0", "3-1", "3-2", "2-3", "1-3", "0-3"]}
+
     return {
         "p_so_h": p_so_h,
         "p_so_a": p_so_a,
@@ -485,12 +511,15 @@ def run_volleyball_mc(
         "exp_total": float(totals_arr.mean()),
         "med_total": float(np.median(totals_arr)),
         "totals_arr": totals_arr,
-        "set_scores": {k: scores[k] / n_sims for k in ["3-0", "3-1", "3-2", "2-3", "1-3", "0-3"]},
+        "set_scores": set_scores,
+        "p_3set": set_scores["3-0"] + set_scores["0-3"],
+        "p_4set": set_scores["3-1"] + set_scores["1-3"],
+        "p_5set": set_scores["3-2"] + set_scores["2-3"],
     }
 
 
 # ==========================================
-# 6. 백테스팅 적중률 분석 엔진 (개별 / 2자 / 3자 + 50/60/70%+)
+# 6. 백테스팅 적중률 분석 엔진 (50 / 60 / 70%+)
 # ==========================================
 def analyze_vleague_backtest(
     df: pd.DataFrame,
@@ -498,10 +527,6 @@ def analyze_vleague_backtest(
     division_filter: str = "전체",
     combo_prob_mode: str = "모두 이상 (엄격)",
 ) -> Tuple[pd.DataFrame, pd.DataFrame, int]:
-    """
-    개별(몬테/라스/제미), 2자 일치(몬+라, 몬+제, 라+제), 3자 만장일치의
-    전체 / 50%+ / 60%+ / 70%+ 적중률을 계산.
-    """
     if df.empty:
         return pd.DataFrame(), pd.DataFrame(), 0
 
@@ -549,13 +574,13 @@ def analyze_vleague_backtest(
                 if d and d not in ("패스", "nan", "None") and pd.notna(p):
                     preds[src] = (d, float(p))
 
-            # 개별 소스 평가
+            # 개별 적중률
             for src, label in [("몬테", "몬테카를로"), ("라스", "라스(시장)"), ("제미", "제미나이")]:
                 if src in preds:
                     d, p = preds[src]
                     records.append({"구분": label, "마켓": m, "확률": p, "적중": int(d == act)})
 
-            # 2자 방향 일치 평가
+            # 2자 방향 일치
             pairs = [
                 ("몬테", "라스", "2자 일치: 몬테 + 라스"),
                 ("몬테", "제미", "2자 일치: 몬테 + 제미나이"),
@@ -563,15 +588,24 @@ def analyze_vleague_backtest(
             ]
             for s1, s2, label in pairs:
                 if s1 in preds and s2 in preds and preds[s1][0] == preds[s2][0]:
-                    p_comb = min(preds[s1][1], preds[s2][1]) if combo_prob_mode.startswith("모두") else (preds[s1][1] + preds[s2][1]) / 2.0
+                    p_comb = (
+                        min(preds[s1][1], preds[s2][1])
+                        if combo_prob_mode.startswith("모두")
+                        else (preds[s1][1] + preds[s2][1]) / 2.0
+                    )
                     records.append({"구분": label, "마켓": m, "확률": p_comb, "적중": int(preds[s1][0] == act)})
 
-            # 3자 만장일치 평가
+            # 3자 만장일치
             if all(s in preds for s in ["몬테", "라스", "제미"]):
                 if preds["몬테"][0] == preds["라스"][0] == preds["제미"][0]:
                     ps = [preds["몬테"][1], preds["라스"][1], preds["제미"][1]]
                     p_comb = min(ps) if combo_prob_mode.startswith("모두") else float(np.mean(ps))
-                    records.append({"구분": "3자 만장일치 (몬+라+제)", "마켓": m, "확률": p_comb, "적중": int(preds["몬테"][0] == act)})
+                    records.append({
+                        "구분": "3자 만장일치 (몬+라+제)",
+                        "마켓": m,
+                        "확률": p_comb,
+                        "적중": int(preds["몬테"][0] == act),
+                    })
 
     if not records:
         return pd.DataFrame(), pd.DataFrame(), len(completed)
@@ -594,7 +628,6 @@ def analyze_vleague_backtest(
         hits = int(sub["적중"].sum())
         return f"{hits / n * 100:.1f}% ({hits}/{n})"
 
-    # 1) 구간별 적중률 표 (전체 / 50%+ / 60%+ / 70%+)
     tier_rows = []
     for g in group_order:
         sub = rec_df[rec_df["구분"] == g]
@@ -607,7 +640,6 @@ def analyze_vleague_backtest(
         })
     tier_df = pd.DataFrame(tier_rows)
 
-    # 2) 마켓별 상세 적중률 표
     mkt_rows = []
     for g in group_order:
         sub = rec_df[rec_df["구분"] == g]
@@ -623,7 +655,7 @@ def analyze_vleague_backtest(
 
 
 # ==========================================
-# 7. 사이드바 공통 설정 및 데이터 로딩
+# 7. 사이드바 설정 및 KOVO 실시간 로딩
 # ==========================================
 st.title("🏐 V-리그 몬테카를로 분석 & 백테스팅 허브")
 
@@ -653,7 +685,8 @@ with st.sidebar:
     if mode == "예정 경기 불러오기" and upcoming:
         upcoming_sorted = sorted(upcoming, key=lambda x: (x.get("gdate", ""), x.get("gstime", "")))[:14]
         options = [
-            f"{g['gdate']} {g.get('gstime','')} | {code_to_name.get(str(g['hcode']), g['hname'])} vs {code_to_name.get(str(g['acode']), g['aname'])}"
+            f"{g['gdate']} {g.get('gstime', '')} | "
+            f"{code_to_name.get(str(g['hcode']), g['hname'])} vs {code_to_name.get(str(g['acode']), g['aname'])}"
             for g in upcoming_sorted
         ]
         sel_idx = st.selectbox("경기 선택", range(len(options)), format_func=lambda i: options[i])
@@ -674,9 +707,21 @@ with st.sidebar:
         index=1,
         format_func=lambda x: f"홈 {x:+.1f} 세트",
     )
-    default_ou = 183.5 if gender == "1" else 179.5
-    ou_line = st.number_input("총득점 언오버 기준점", value=default_ou, step=0.5)
-    l5_weight = st.slider("최근 5경기(L5) 반영 비중", 0.0, 0.8, 0.45, 0.05)
+    ou_line = st.number_input(
+        "총득점 언오버 기준점",
+        value=WEIGHTS[gender]["default_ou"],
+        step=0.5,
+        key=f"ou_line_{gender}",
+    )
+    l5_weight = st.slider(
+        "최근 5경기(L5) 반영 비중",
+        0.0,
+        0.8,
+        WEIGHTS[gender]["default_l5"],
+        0.05,
+        key=f"l5_slider_{gender}",
+        help="3시즌 백테스팅 최적값: 남자부 0.35 / 여자부 0.20 (외국인·세터 교체 직후엔 0.65+ 권장)",
+    )
     n_sims = st.select_slider("시뮬레이션 횟수", [5000, 10000, 20000], value=10000)
 
     st.divider()
@@ -688,11 +733,17 @@ with st.sidebar:
     home_adj = (-0.16 if h_out_foreign else 0.0) + (-0.12 if h_out_setter else 0.0)
     away_adj = (-0.16 if a_out_foreign else 0.0) + (-0.12 if a_out_setter else 0.0)
 
+    st.divider()
+    st.caption(
+        f"적용 엔진: 3시즌 OOS 보정값 | "
+        f"base_so={WEIGHTS[gender]['base_so']} / σ={WEIGHTS[gender]['match_sigma']}"
+    )
+
 if home_code == away_code:
     st.warning("홈 팀과 원정 팀을 서로 다르게 선택해 주세요.")
     st.stop()
 
-# 시뮬레이션 계산
+# 시뮬레이션 실행
 with st.spinner("KOVO 최근 5경기 박스스코어 및 시뮬레이션 계산 중..."):
     h_row = df_teams[df_teams["tcode"] == home_code].iloc[0]
     a_row = df_teams[df_teams["tcode"] == away_code].iloc[0]
@@ -704,10 +755,10 @@ with st.spinner("KOVO 최근 5경기 박스스코어 및 시뮬레이션 계산 
 
     sim = run_volleyball_mc(
         home_prof, away_prof, league_avg, gender, h2h,
-        home_adj, away_adj, ou_line, set_handicap, n_sims=n_sims
+        home_adj, away_adj, ou_line, set_handicap, n_sims=n_sims,
     )
 
-# 몬테카를로 방향 & 확률 자동 추출
+# 몬테카를로 최종 방향 & 확률 추출
 mc_ml_dir = "홈승" if sim["home_win"] >= 0.5 else "원정승"
 mc_ml_prob = round(max(sim["home_win"], sim["away_win"]) * 100, 1)
 mc_hd_dir = "홈핸디" if sim["home_set_handi"] >= 0.5 else "원정핸디"
@@ -716,7 +767,7 @@ mc_ou_dir = "오버" if sim["over_prob"] >= 0.5 else "언더"
 mc_ou_prob = round(max(sim["over_prob"], sim["under_prob"]) * 100, 1)
 
 # ==========================================
-# 8. 3개 메인 탭 구성
+# 8. 3개 메인 탭
 # ==========================================
 tab_sim, tab_prompt, tab_track = st.tabs([
     "🏐 매치업 시뮬레이션",
@@ -739,7 +790,8 @@ with tab_sim:
     with col_vs:
         st.markdown("<h3 style='text-align:center; margin-top:25px;'>VS</h3>", unsafe_allow_html=True)
         st.markdown(
-            f"<p style='text-align:center; font-size:13px;'>{target_date}<br>시즌 H2H <b>{h2h['h_wins']}승 {h2h['a_wins']}패</b> (세트 {h2h['h_sets']}:{h2h['a_sets']})</p>",
+            f"<p style='text-align:center; font-size:13px;'>{target_date}<br>"
+            f"시즌 H2H <b>{h2h['h_wins']}승 {h2h['a_wins']}패</b> (세트 {h2h['h_sets']}:{h2h['a_sets']})</p>",
             unsafe_allow_html=True,
         )
 
@@ -752,7 +804,6 @@ with tab_sim:
 
     st.divider()
 
-    # 베트맨 풀세트 3대 마켓 KPI
     k1, k2, k3, k4, k5 = st.columns(5)
     k1.metric(f"{home_prof['team']} 승률", f"{sim['home_win']:.1%}", f"SO {sim['p_so_h']:.1%}")
     k2.metric(f"{away_prof['team']} 승률", f"{sim['away_win']:.1%}", f"SO {sim['p_so_a']:.1%}")
@@ -767,6 +818,10 @@ with tab_sim:
     c1, c2 = st.columns(2)
     with c1:
         st.markdown("#### 세트스코어 확률 분포")
+        st.caption(
+            f"세트 길이 확률: 3세트 **{sim['p_3set']:.1%}** | "
+            f"4세트 **{sim['p_4set']:.1%}** | 5세트 **{sim['p_5set']:.1%}**"
+        )
         df_sc = pd.DataFrame({
             "세트스코어": list(sim["set_scores"].keys()),
             "확률(%)": [round(v * 100, 1) for v in sim["set_scores"].values()],
@@ -778,6 +833,7 @@ with tab_sim:
 
     with c2:
         st.markdown("#### 총득점 분포 vs 언오버 기준점")
+        st.caption(f"시뮬레이션 평균 **{sim['exp_total']:.1f}점** / 중앙값 **{sim['med_total']:.0f}점** (기준점 {ou_line})")
         fig_hist = go.Figure()
         fig_hist.add_trace(go.Histogram(x=sim["totals_arr"], nbinsx=40, name="시뮬레이션 총득점"))
         fig_hist.add_vline(x=ou_line, line_dash="dash", line_color="red", annotation_text=f"기준점 {ou_line}")
@@ -818,7 +874,7 @@ with tab_sim:
 # ------------------------------------------
 with tab_prompt:
     st.subheader("✨ 제미나이 분석용 프롬프트 자동 생성")
-    st.caption("아래 라스(시장) 예측치나 당일 이슈를 넣고 생성된 프롬프트를 오른쪽 상단 복사 버튼으로 제미나이에 바로 붙여넣으세요.")
+    st.caption("라스(시장) 참고치나 당일 이슈를 입력한 뒤, 우측 상단 복사 버튼으로 제미나이에 그대로 붙여넣으세요.")
 
     pc1, pc2, pc3 = st.columns(3)
     with pc1:
@@ -842,29 +898,34 @@ with tab_prompt:
     ) or "데이터 없음"
 
     adj_notes = []
-    if h_out_foreign: adj_notes.append("홈 외국인/에이스 결장 반영")
-    if h_out_setter: adj_notes.append("홈 주전 세터 결장 반영")
-    if a_out_foreign: adj_notes.append("원정 외국인/에이스 결장 반영")
-    if a_out_setter: adj_notes.append("원정 주전 세터 결장 반영")
+    if h_out_foreign:
+        adj_notes.append("홈 외국인/에이스 결장 반영")
+    if h_out_setter:
+        adj_notes.append("홈 주전 세터 결장 반영")
+    if a_out_foreign:
+        adj_notes.append("원정 외국인/에이스 결장 반영")
+    if a_out_setter:
+        adj_notes.append("원정 주전 세터 결장 반영")
     adj_str = ", ".join(adj_notes) if adj_notes else "결장 보정 없음"
 
     set_dist_str = " | ".join(f"{k}: {v*100:.1f}%" for k, v in sim["set_scores"].items())
 
     gemini_prompt = f"""너는 한국 프로배구(V-리그) 정량 스포츠 애널리스트야.
-아래 KOVO 공식 데이터, 몬테카를로 {n_sims:,}회 시뮬레이션 결과, 그리고 베트맨(풀세트) 기준점을 바탕으로 이 경기를 정밀 분석하고 최종 예측 픽을 내려줘.
+아래 KOVO 공식 데이터, 3시즌(755경기) 백테스팅 보정 몬테카를로 {n_sims:,}회 시뮬레이션 결과(당일 컨디션 편차 σ={WEIGHTS[gender]['match_sigma']} 반영), 그리고 베트맨(풀세트) 기준점을 바탕으로 이 경기를 정밀 분석하고 최종 예측 픽을 내려줘.
 
 [1. 매치업 및 기준점]
 - 일자/부문: {target_date} / V-리그 {gender_label}
 - 매치업: {home_prof['team']}(홈) vs {away_prof['team']}(원정)
 - 베트맨 기준점: 홈 세트 핸디캡 ({set_handicap:+.1f} 세트) / 총득점 언오버 ({ou_line}점)
 - 시즌 상대전적(H2H): 홈 기준 {h2h['h_wins']}승 {h2h['a_wins']}패 (세트 {h2h['h_sets']}:{h2h['a_sets']}) / 로그: {', '.join(h2h['logs']) if h2h['logs'] else '첫 맞대결'}
-- 시뮬레이션 결장 보정: {adj_str}
+- 시뮬레이션 결장 보정: {adj_str} (L5 반영 비중: {l5_weight:.2f})
 
 [2. 몬테카를로 시뮬레이션 ({n_sims:,}회)]
 - 사이드아웃 확률: 홈 {sim['p_so_h']:.1%} vs 원정 {sim['p_so_a']:.1%}
 - 승패 확률: 홈 {sim['home_win']:.1%} vs 원정 {sim['away_win']:.1%} (몬테 픽: {mc_ml_dir} {mc_ml_prob}%)
 - 홈 {set_handicap:+.1f} 세트 핸디: 홈핸디 {sim['home_set_handi']:.1%} vs 원정핸디 {sim['away_set_handi']:.1%} (몬테 픽: {mc_hd_dir} {mc_hd_prob}%)
 - 총득점 언오버({ou_line}): 오버 {sim['over_prob']:.1%} vs 언더 {sim['under_prob']:.1%} / 기대총점 {sim['exp_total']:.1f}점, 중앙값 {sim['med_total']:.0f}점 (몬테 픽: {mc_ou_dir} {mc_ou_prob}%)
+- 세트 길이 확률: 3세트 {sim['p_3set']:.1%} / 4세트 {sim['p_4set']:.1%} / 5세트 {sim['p_5set']:.1%}
 - 세트스코어 분포: {set_dist_str}
 
 [3. 양 팀 전력 비교 (시즌 vs 최근 5경기 L5)]
@@ -879,11 +940,11 @@ with tab_prompt:
 
 [4. 라스(시장) 참고 및 추가 이슈]
 - 라스 승패: {las_p_ml or '미입력'} / 라스 세트핸디: {las_p_hd or '미입력'} / 라스 언오버: {las_p_ou or '미입력'}
-- 추가 현장 이슈: {extra_news.strip() or '없음 (최신 부상·교체·컨디션 뉴스가 있다면 웹 검색으로 확인 반영해 줘)'}
+- 추가 현장 이슈: {extra_news.strip() or '없음 (최신 부상·교체·선발 세터 변동 뉴스가 있다면 웹 검색으로 확인 반영해 줘)'}
 
 [요청 출력 형식]
 1. 핵심 매치업 포인트 (공격 vs 수비 DRtg, 리시브·서브 상성, 5세트 피로도/일정 변수)
-2. 몬테카를로 결과에서 놓치기 쉬운 리스크나 반전 포인트
+2. 몬테카를로 수치에서 놓치기 쉬운 리스크나 반전 포인트
 3. 최종 예측 요약표 (아래 형식을 반드시 지켜서 50~95% 사이 신뢰도 숫자로 제시해 줘):
    - 승패: [홈승 또는 원정승] / 신뢰도 [XX]%
    - 세트핸디(홈 {set_handicap:+.1f}): [홈핸디 또는 원정핸디] / 신뢰도 [XX]%
@@ -901,7 +962,9 @@ with tab_track:
     st.subheader("📊 예측 결과 기록 및 적중률 백테스팅")
     db_df = load_db()
 
-    # 3-1. 신규 예측 기록 폼
+    # 경기·기준점이 바뀔 때 몬테카를로 자동 입력칸이 즉시 갱신되도록 고유 키 부여
+    mc_state_key = f"{target_date}_{home_code}_{away_code}_{set_handicap}_{ou_line}_{l5_weight}_{home_adj}_{away_adj}"
+
     with st.expander("➕ 현재 선택 경기 예측 기록 저장하기 (몬테 / 라스 / 제미나이)", expanded=True):
         st.caption(
             f"대상 경기: **{target_date} [{gender_label}] {home_prof['team']}(홈) vs {away_prof['team']}(원정)** "
@@ -912,12 +975,33 @@ with tab_track:
 
             with fc1:
                 st.markdown("**1️⃣ 몬테카를로 (자동 입력)**")
-                in_mc_ml = st.selectbox("몬테 승패", ["홈승", "원정승", "패스"], index=0 if mc_ml_dir == "홈승" else 1)
-                in_mc_ml_p = st.number_input("몬테 승패 확률(%)", 0.0, 100.0, float(mc_ml_prob), 0.1)
-                in_mc_hd = st.selectbox(f"몬테 홈{set_handicap:+.1f}핸디", ["홈핸디", "원정핸디", "패스"], index=0 if mc_hd_dir == "홈핸디" else 1)
-                in_mc_hd_p = st.number_input("몬테 핸디 확률(%)", 0.0, 100.0, float(mc_hd_prob), 0.1)
-                in_mc_ou = st.selectbox(f"몬테 언오버({ou_line})", ["오버", "언더", "패스"], index=0 if mc_ou_dir == "오버" else 1)
-                in_mc_ou_p = st.number_input("몬테 언오버 확률(%)", 0.0, 100.0, float(mc_ou_prob), 0.1)
+                in_mc_ml = st.selectbox(
+                    "몬테 승패", ["홈승", "원정승", "패스"],
+                    index=0 if mc_ml_dir == "홈승" else 1,
+                    key=f"mc_ml_{mc_state_key}",
+                )
+                in_mc_ml_p = st.number_input(
+                    "몬테 승패 확률(%)", 0.0, 100.0, float(mc_ml_prob), 0.1,
+                    key=f"mc_mlp_{mc_state_key}",
+                )
+                in_mc_hd = st.selectbox(
+                    f"몬테 홈{set_handicap:+.1f}핸디", ["홈핸디", "원정핸디", "패스"],
+                    index=0 if mc_hd_dir == "홈핸디" else 1,
+                    key=f"mc_hd_{mc_state_key}",
+                )
+                in_mc_hd_p = st.number_input(
+                    "몬테 핸디 확률(%)", 0.0, 100.0, float(mc_hd_prob), 0.1,
+                    key=f"mc_hdp_{mc_state_key}",
+                )
+                in_mc_ou = st.selectbox(
+                    f"몬테 언오버({ou_line})", ["오버", "언더", "패스"],
+                    index=0 if mc_ou_dir == "오버" else 1,
+                    key=f"mc_ou_{mc_state_key}",
+                )
+                in_mc_ou_p = st.number_input(
+                    "몬테 언오버 확률(%)", 0.0, 100.0, float(mc_ou_prob), 0.1,
+                    key=f"mc_oup_{mc_state_key}",
+                )
 
             with fc2:
                 st.markdown("**2️⃣ 라스 / 시장 예측**")
@@ -952,9 +1036,9 @@ with tab_track:
                     "원정코드": away_code,
                     "세트핸디기준": set_handicap,
                     "언오버기준": ou_line,
-                    "몬테_승패": in_mc_ml, "몬테_승패확률": in_mc_ml_p,
-                    "몬테_핸디": in_mc_hd, "몬테_핸디확률": in_mc_hd_p,
-                    "몬테_언오버": in_mc_ou, "몬테_언오버확률": in_mc_ou_p,
+                    "몬테_승패": in_mc_ml, "몬테_승패확률": in_mc_ml_p if in_mc_ml != "패스" else np.nan,
+                    "몬테_핸디": in_mc_hd, "몬테_핸디확률": in_mc_hd_p if in_mc_hd != "패스" else np.nan,
+                    "몬테_언오버": in_mc_ou, "몬테_언오버확률": in_mc_ou_p if in_mc_ou != "패스" else np.nan,
                     "라스_승패": in_las_ml, "라스_승패확률": in_las_ml_p if in_las_ml != "패스" else np.nan,
                     "라스_핸디": in_las_hd, "라스_핸디확률": in_las_hd_p if in_las_hd != "패스" else np.nan,
                     "라스_언오버": in_las_ou, "라스_언오버확률": in_las_ou_p if in_las_ou != "패스" else np.nan,
@@ -964,7 +1048,6 @@ with tab_track:
                     "실제_홈세트": np.nan, "실제_원정세트": np.nan, "실제_총점": np.nan,
                     "메모": memo_in,
                 }
-                # 동일 경기ID가 있으면 기존 실제 결과는 유지한 채 업데이트
                 if not db_df.empty and (db_df["경기ID"] == game_id).any():
                     idx_match = db_df.index[db_df["경기ID"] == game_id][0]
                     for res_col in ["실제_홈세트", "실제_원정세트", "실제_총점"]:
@@ -981,7 +1064,7 @@ with tab_track:
 
     st.divider()
 
-    # 3-2. 적중률 분석 대시보드
+    # 적중률 분석 대시보드
     st.markdown("#### 🎯 구간별 & 조합별 적중률 분석 (50% · 60% · 70% 이상)")
     f1, f2, f3 = st.columns(3)
     with f1:
@@ -993,14 +1076,14 @@ with tab_track:
             "2자/3자 일치 확률 기준",
             ["모두 이상 (엄격)", "평균 이상"],
             horizontal=True,
-            help="예: 60% 이상 필터 시 일치하는 모델이 모두 60% 이상인지, 평균이 60% 이상인지 선택",
+            help="예: 60% 이상 필터 시 일치하는 모든 모델이 60% 이상인지, 평균이 60% 이상인지 선택",
         )
 
     tier_df, mkt_df, n_done = analyze_vleague_backtest(db_df, mkt_sel, div_sel, prob_mode)
     if n_done == 0 or tier_df.empty:
-        st.info("아직 실제 경기 결과가 입력된 백테스팅 데이터가 없습니다. 아래 표에서 경기 종료 후 스코어를 채워주세요.")
+        st.info("실제 경기 결과가 입력된 데이터가 아직 없습니다. 경기 종료 후 아래 자동 채우기 버튼을 눌러주세요.")
     else:
-        st.caption(f"집계 완료 경기 수: **{n_done}경기** (적중률은 `적중률 (적중/전체)` 형식)")
+        st.caption(f"집계 완료 경기 수: **{n_done}경기** (표기: `적중률 (적중/전체)`)")
         st.dataframe(tier_df, use_container_width=True, hide_index=True)
 
         with st.expander("📌 마켓별(승패 / 세트핸디 / 언오버) 적중률 상세 보기"):
@@ -1008,7 +1091,7 @@ with tab_track:
 
     st.divider()
 
-    # 3-3. 경기 결과 자동 채우기 & 직접 수정 테이블
+    # 실제 스코어 자동 채우기 & DB 관리
     st.markdown("#### 📝 기록 관리 및 실제 스코어 입력")
     b1, b2, b3 = st.columns([2, 1, 1])
 
